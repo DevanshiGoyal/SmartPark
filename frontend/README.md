@@ -53,23 +53,7 @@ smart-parking/
 * Jupyter Notebook
 * pip (Python package manager)
 
-### Installation Steps
 
-```bash
-# Clone the repository
-git clone https://github.com/samiksha-walia/Smart-Parking.git
-
-# Navigate into the project folder
-cd smart-parking
-
-# (Optional) Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate  # on Unix
-venv\Scripts\activate     # on Windows
-
-# Start Jupyter Notebook
-jupyter notebook parking-lot-prediction.ipynb
-```
 
 ## 📊 Model Workflow
 

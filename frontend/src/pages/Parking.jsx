@@ -34,7 +34,7 @@ export default function Parking() {
   // 🖼️ Carousel data
   const detectionImages = [
     "/cloudy.PNG",
-    "/Rainy.PNG",
+    "/Rainy.png",
     "/sunny.PNG",
     "/UFPR04_cloudy.png",
     "/UFPR04_rainy.png",
