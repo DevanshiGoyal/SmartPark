@@ -233,6 +233,6 @@ If you found this project interesting or useful, please consider giving it a ⭐
 
 ---
 
-**Made with ❤️ by Devanshi Goyal**
+
 
 > 🚀 *Building the future of smart city parking solutions*
