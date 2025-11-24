@@ -101,7 +101,7 @@ jupyter notebook parking-lot-prediction.ipynb
 * 📹 Real-time detection using OpenCV and live camera input
 * ☁️ Deploy the model with Flask or FastAPI
 * 📦 Create Docker image for easier deployment
-* 📱 Build a mobile/web dashboard to show parking availability
+* 📱 Build a mobile/web dashboard to show parking availability .
 
 ## 👤 Author
 
