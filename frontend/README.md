@@ -103,10 +103,6 @@ jupyter notebook parking-lot-prediction.ipynb
 * 📦 Create Docker image for easier deployment
 * 📱 Build a mobile/web dashboard to show parking availability .
 
-## 👤 Author
-
-**Samiksha Walia**
-[GitHub](https://github.com/samiksha-walia) • [LinkedIn](https://linkedin.com/in/samiksha-walia)
 
 ## 🌟 Support This Project
 
