@@ -1,268 +1,668 @@
-from flask import Flask, request, jsonify
+"""
+🚗 Parking Space Detection API with YOLOv8
+============================================
+Features:
+- Image upload endpoint
+- Real-time parking detection
+- Visual output with bounding boxes
+- JSON response with statistics
+- Support for single image and batch processing
+"""
+
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
+from ultralytics import YOLO
+import cv2
 import numpy as np
-import base64
 from PIL import Image
 import io
 import os
-from data_generator import ParkingDataGenerator
+from datetime import datetime
+import base64
+
+# ============================================================
+# Initialize Flask App
+# ============================================================
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+CORS(app)  # Enable CORS for frontend integration
 
-# Global variable to store the model
-model = None
-keras = None
+# ============================================================
+# Configuration
+# ============================================================
 
-# Initialize data generator
-data_generator = ParkingDataGenerator()
+MODEL_PATH = "best.pt"  # Your trained model
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
+CONFIDENCE_THRESHOLD = 0.25
 
-def load_keras():
-    """Lazy load TensorFlow/Keras to speed up startup"""
-    global keras
-    if keras is None:
-        print("📦 Loading TensorFlow/Keras (this may take a moment)...")
-        from tensorflow import keras as k
-        keras = k
-    return keras
+# Create folders
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-def load_model_if_exists():
-    """Load the trained model if it exists"""
-    global model
-    model_path = os.path.join(os.path.dirname(__file__), '..', 'parking_model.h5')
-    if os.path.exists(model_path):
-        try:
-            k = load_keras()
-            model = k.models.load_model(model_path)
-            print(f"✅ Model loaded from {model_path}")
-            return True
-        except Exception as e:
-            print(f"⚠️ Error loading model: {e}")
-            return False
-    else:
-        print(f"⚠️ Model file not found at {model_path}")
-        print("ℹ️ Please train the model first using the Jupyter notebook")
-        return False
+# ============================================================
+# Load YOLOv8 Model
+# ============================================================
 
-@app.route('/')
+print("🔄 Loading YOLOv8 model...")
+try:
+    model = YOLO(MODEL_PATH)
+    print(f"✅ Model loaded successfully from {MODEL_PATH}")
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    model = None
+
+# ============================================================
+# Color Configuration for Visualization
+# ============================================================
+
+COLORS = {
+    'space-empty': (0, 255, 0),      # Green for empty
+    'space-occupied': (0, 0, 255),   # Red for occupied
+}
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def get_detection_bounds(results, conf_threshold=0.25):
+    """
+    Get the bounding box that encompasses all detections
+    Returns (min_x, min_y, max_x, max_y) or None if no detections
+    """
+    min_x, min_y = float('inf'), float('inf')
+    max_x, max_y = 0, 0
+    has_detections = False
+    
+    for result in results:
+        boxes = result.boxes
+        
+        for box in boxes:
+            conf = float(box.conf[0])
+            
+            if conf < conf_threshold:
+                continue
+            
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            
+            min_x = min(min_x, x1)
+            min_y = min(min_y, y1)
+            max_x = max(max_x, x2)
+            max_y = max(max_y, y2)
+            has_detections = True
+    
+    if not has_detections:
+        return None
+    
+    # Add some padding (10% of width/height)
+    padding_x = int((max_x - min_x) * 0.1)
+    padding_y = int((max_y - min_y) * 0.1)
+    
+    return (
+        max(0, min_x - padding_x),
+        max(0, min_y - padding_y),
+        max_x + padding_x,
+        max_y + padding_y
+    )
+
+
+def draw_detections(image, results, conf_threshold=0.25, crop_to_detections=True):
+    """
+    Draw bounding boxes and labels on image
+    Optionally crop to detection area
+    """
+    img_draw = image.copy()
+    
+    for result in results:
+        boxes = result.boxes
+        
+        for box in boxes:
+            # Get box coordinates
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            
+            # Get confidence and class
+            conf = float(box.conf[0])
+            cls = int(box.cls[0])
+            class_name = result.names[cls]
+            
+            # Skip low confidence detections
+            if conf < conf_threshold:
+                continue
+            
+            # Get color based on class
+            color = COLORS.get(class_name, (255, 255, 0))
+            
+            # Draw bounding box
+            cv2.rectangle(img_draw, (x1, y1), (x2, y2), color, 2)
+            
+            # Prepare label
+            label = f"{class_name.replace('space-', '')}: {conf:.2f}"
+            
+            # Get text size for background
+            (text_width, text_height), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+            )
+            
+            # Draw label background
+            cv2.rectangle(
+                img_draw,
+                (x1, y1 - text_height - 10),
+                (x1 + text_width, y1),
+                color,
+                -1
+            )
+            
+            # Draw label text
+            cv2.putText(
+                img_draw,
+                label,
+                (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA
+            )
+    
+    # Crop to detection area if requested
+    if crop_to_detections:
+        bounds = get_detection_bounds(results, conf_threshold)
+        if bounds:
+            min_x, min_y, max_x, max_y = bounds
+            img_draw = img_draw[min_y:max_y, min_x:max_x]
+    
+    return img_draw
+
+
+def get_detection_stats(results, conf_threshold=0.25):
+    """
+    Extract detection statistics
+    """
+    stats = {
+        'total_spaces': 0,
+        'empty_spaces': 0,
+        'occupied_spaces': 0,
+        'occupancy_rate': 0.0,
+        'detections': []
+    }
+    
+    for result in results:
+        boxes = result.boxes
+        
+        for box in boxes:
+            conf = float(box.conf[0])
+            
+            if conf < conf_threshold:
+                continue
+            
+            cls = int(box.cls[0])
+            class_name = result.names[cls]
+            x1, y1, x2, y2 = map(float, box.xyxy[0])
+            
+            stats['total_spaces'] += 1
+            
+            if class_name == 'space-empty':
+                stats['empty_spaces'] += 1
+            elif class_name == 'space-occupied':
+                stats['occupied_spaces'] += 1
+            
+            # Add detection details
+            stats['detections'].append({
+                'class': class_name,
+                'confidence': round(conf, 4),
+                'bbox': {
+                    'x1': round(x1, 2),
+                    'y1': round(y1, 2),
+                    'x2': round(x2, 2),
+                    'y2': round(y2, 2)
+                }
+            })
+    
+    # Calculate occupancy rate
+    if stats['total_spaces'] > 0:
+        stats['occupancy_rate'] = round(
+            (stats['occupied_spaces'] / stats['total_spaces']) * 100, 2
+        )
+    
+    return stats
+
+
+def extract_spot_details(results, conf_threshold=0.25):
+    """
+    Build per-spot occupancy booleans and confidence scores for frontend
+    """
+    per_spot = []
+    confidences = []
+
+    for result in results:
+        boxes = result.boxes
+
+        for box in boxes:
+            conf = float(box.conf[0])
+
+            if conf < conf_threshold:
+                continue
+
+            cls = int(box.cls[0])
+            class_name = result.names[cls]
+
+            per_spot.append(class_name == 'space-occupied')
+            confidences.append(round(conf, 4))
+
+    return per_spot, confidences
+
+
+def image_to_base64(image):
+    """
+    Convert OpenCV image to base64 string
+    """
+    _, buffer = cv2.imencode('.jpg', image)
+    img_base64 = base64.b64encode(buffer).decode('utf-8')
+    return img_base64
+
+
+def run_detection_pipeline(file_storage, conf_threshold):
+    """
+    Parse inbound image, run YOLO inference, save artifacts, and
+    return (stats, annotated_image, metadata dict)
+    """
+    img_bytes = file_storage.read()
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if img is None:
+        raise ValueError('Invalid image file')
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    original_filename = f"original_{timestamp}.jpg"
+    annotated_filename = f"detected_{timestamp}.jpg"
+
+    original_path = os.path.join(UPLOAD_FOLDER, original_filename)
+    annotated_path = os.path.join(OUTPUT_FOLDER, annotated_filename)
+
+    cv2.imwrite(original_path, img)
+
+    results = model(img, conf=conf_threshold, verbose=False)
+    stats = get_detection_stats(results, conf_threshold)
+    img_annotated = draw_detections(img, results, conf_threshold)
+
+    cv2.imwrite(annotated_path, img_annotated)
+
+    metadata = {
+        'timestamp': timestamp,
+        'original_filename': original_filename,
+        'annotated_filename': annotated_filename
+    }
+
+    return stats, img_annotated, metadata
+
+
+def build_frontend_payload(stats, img_annotated, include_image=True):
+    """
+    Format detection output so it matches the frontend contract.
+    """
+    per_spot = [
+        detection['class'] == 'space-occupied'
+        for detection in stats.get('detections', [])
+    ]
+    confidence_values = [
+        detection['confidence']
+        for detection in stats.get('detections', [])
+    ]
+
+    payload = {
+        'success': True,
+        'timestamp': datetime.now().isoformat(),
+        'annotated_image_b64': image_to_base64(img_annotated) if include_image else None,
+        'occupied_count': stats['occupied_spaces'],
+        'free_count': stats['empty_spaces'],
+        'per_spot': per_spot,
+        'confidence': confidence_values,
+        'total_count': stats['total_spaces']
+    }
+    return payload
+
+
+# ============================================================
+# API Routes
+# ============================================================
+
+@app.route('/', methods=['GET'])
 def home():
-    """Health check endpoint"""
+    """
+    API home page with documentation
+    """
     return jsonify({
-        'status': 'running',
-        'message': 'ParkSight API is active',
-        'model_loaded': model is not None
-    })
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Detailed health check"""
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model is not None,
+        'message': 'Parking Space Detection API',
+        'version': '1.0.0',
+        'model': 'YOLOv8m (Fine-tuned on PKLot)',
+        'performance': {
+            'mAP50': 0.9930,
+            'mAP50-95': 0.9891,
+            'Precision': 0.9987,
+            'Recall': 0.9914,
+            'F1-Score': 0.9950
+        },
         'endpoints': {
-            'predict_image': '/api/predict/image',
-            'predict_video': '/api/predict/video',
-            'parking_status': '/api/parking/status',
-            'train_model': '/api/train'
+            '/': 'API documentation',
+            '/health': 'Health check',
+            '/detect': 'POST - Detect parking spaces (returns JSON + image)',
+            '/detect/json': 'POST - Detect parking spaces (JSON only)',
+            '/detect/image': 'POST - Detect parking spaces (image only)',
+            '/infer': 'POST - Frontend-aligned JSON response'
+        },
+        'usage': {
+            'method': 'POST',
+            'content_type': 'multipart/form-data',
+            'parameters': {
+                'image': 'Image file (required)',
+                'confidence': 'Confidence threshold (optional, default: 0.25)',
+                'return_image': 'Return annotated image (optional, default: true)'
+            }
         }
     })
 
-@app.route('/api/parking/status', methods=['GET'])
-def get_parking_status():
-    """Get current parking lot status"""
-    # Mock data for demonstration
-    # In a real scenario, this would come from the ML model predictions
-    occupied_slots = [1, 10, 11, 29, 30, 32]
-    total_slots = 41
-    available_slots = total_slots - len(occupied_slots)
-    
-    slots = []
-    for i in range(1, total_slots + 1):
-        slots.append({
-            'id': i,
-            'status': 'occupied' if i in occupied_slots else 'available'
-        })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    Health check endpoint
+    """
+    model_status = "loaded" if model is not None else "not loaded"
     
     return jsonify({
-        'total_slots': total_slots,
-        'available_slots': available_slots,
-        'occupied_slots': len(occupied_slots),
-        'slots': slots,
-        'occupancy_rate': (len(occupied_slots) / total_slots) * 100
+        'status': 'healthy' if model is not None else 'unhealthy',
+        'model': model_status,
+        'timestamp': datetime.now().isoformat()
     })
 
-@app.route('/api/predict/image', methods=['POST'])
-def predict_image():
-    """Predict parking occupancy from uploaded image"""
-    if not model:
-        return jsonify({
-            'error': 'Model not loaded',
-            'message': 'Please train the model first using the Jupyter notebook'
-        }), 503
+
+@app.route('/detect', methods=['POST'])
+def detect_parking():
+    """
+    Main detection endpoint - returns both JSON and annotated image
+    """
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    # Check if image file is present
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    
+    file = request.files['image']
+    
+    if file.filename == '':
+        return jsonify({'error': 'Empty filename'}), 400
+    
+    # Get confidence threshold from request
+    conf_threshold = float(request.form.get('confidence', CONFIDENCE_THRESHOLD))
+    return_image = request.form.get('return_image', 'true').lower() == 'true'
     
     try:
-        # Get image from request
-        if 'image' not in request.files:
-            return jsonify({'error': 'No image provided'}), 400
+        stats, img_annotated, metadata = run_detection_pipeline(file, conf_threshold)
+        frontend_payload = build_frontend_payload(stats, img_annotated, include_image=return_image)
         
-        file = request.files['image']
+        response_data = {
+            'success': True,
+            'timestamp': metadata['timestamp'],
+            'annotated_image_b64': frontend_payload['annotated_image_b64'],
+            'occupied_count': frontend_payload['occupied_count'],
+            'free_count': frontend_payload['free_count'],
+            'per_spot': frontend_payload['per_spot'],
+            'confidence': frontend_payload['confidence'],
+            'statistics': stats,
+            'model_info': {
+                'confidence_threshold': conf_threshold,
+                'model': 'YOLOv8m'
+            },
+            'files': {
+                'original': metadata['original_filename'],
+                'annotated': metadata['annotated_filename']
+            }
+        }
         
-        # Read and preprocess image
-        image = Image.open(file.stream)
-        image = image.convert('RGB')
-        image = image.resize((54, 32))  # Resize to model input size
-        image_array = np.array(image) / 255.0  # Normalize
-        image_array = np.expand_dims(image_array, axis=0)
+        return jsonify(response_data)
+    
+    except ValueError as ve:
+        return jsonify({'error': str(ve)}), 400
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/infer', methods=['POST'])
+def infer_endpoint():
+    """
+    Frontend-aligned endpoint that returns simplified JSON payload
+    """
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+
+    file = request.files['image']
+
+    if file.filename == '':
+        return jsonify({'error': 'Empty filename'}), 400
+
+    conf_threshold = float(request.form.get('confidence', CONFIDENCE_THRESHOLD))
+
+    try:
+        img_bytes = file.read()
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if img is None:
+            return jsonify({'error': 'Invalid image file'}), 400
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        original_filename = f"original_{timestamp}.jpg"
+        original_path = os.path.join(UPLOAD_FOLDER, original_filename)
+        cv2.imwrite(original_path, img)
+
+        results = model(img, conf=conf_threshold, verbose=False)
+
+        stats = get_detection_stats(results, conf_threshold)
+        per_spot, confidences = extract_spot_details(results, conf_threshold)
+
+        img_annotated = draw_detections(img, results, conf_threshold)
+        annotated_filename = f"detected_{timestamp}.jpg"
+        annotated_path = os.path.join(OUTPUT_FOLDER, annotated_filename)
+        cv2.imwrite(annotated_path, img_annotated)
+
+        response_data = {
+            'success': True,
+            'timestamp': datetime.now().isoformat(),
+            'annotated_image_b64': image_to_base64(img_annotated),
+            'occupied_count': stats['occupied_spaces'],
+            'free_count': stats['empty_spaces'],
+            'per_spot': per_spot,
+            'confidence': confidences,
+            'files': {
+                'original': original_filename,
+                'annotated': annotated_filename
+            }
+        }
+
+        return jsonify(response_data)
         
-        # Make prediction
-        prediction = model.predict(image_array)
-        is_occupied = prediction[0][0] > 0.5
-        confidence = float(prediction[0][0] if is_occupied else 1 - prediction[0][0])
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/detect/json', methods=['POST'])
+def detect_json_only():
+    """
+    Detection endpoint - returns only JSON (no image)
+    """
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    
+    file = request.files['image']
+    conf_threshold = float(request.form.get('confidence', CONFIDENCE_THRESHOLD))
+    
+    try:
+        # Read and process image
+        img_bytes = file.read()
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Run detection
+        results = model(img, conf=conf_threshold, verbose=False)
+        
+        # Get statistics
+        stats = get_detection_stats(results, conf_threshold)
         
         return jsonify({
-            'prediction': 'occupied' if is_occupied else 'available',
-            'confidence': confidence,
-            'raw_score': float(prediction[0][0])
+            'success': True,
+            'statistics': stats,
+            'timestamp': datetime.now().isoformat()
         })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/predict/video', methods=['POST'])
-def predict_video():
-    """Process video frame for parking detection"""
-    if not model:
         return jsonify({
-            'error': 'Model not loaded',
-            'message': 'Please train the model first using the Jupyter notebook'
-        }), 503
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@app.route('/detect/image', methods=['POST'])
+def detect_image_only():
+    """
+    Detection endpoint - returns only annotated image
+    """
+    if model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file provided'}), 400
+    
+    file = request.files['image']
+    conf_threshold = float(request.form.get('confidence', CONFIDENCE_THRESHOLD))
     
     try:
-        # Get base64 encoded frame from request
-        data = request.get_json()
-        if 'frame' not in data:
-            return jsonify({'error': 'No frame provided'}), 400
+        # Read and process image
+        img_bytes = file.read()
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Decode base64 image
-        image_data = base64.b64decode(data['frame'].split(',')[1])
-        image = Image.open(io.BytesIO(image_data))
+        # Run detection
+        results = model(img, conf=conf_threshold, verbose=False)
         
-        # Preprocess
-        image = image.convert('RGB')
-        image = image.resize((54, 32))
-        image_array = np.array(image) / 255.0
-        image_array = np.expand_dims(image_array, axis=0)
+        # Draw detections
+        img_annotated = draw_detections(img, results, conf_threshold)
         
-        # Predict
-        prediction = model.predict(image_array)
-        is_occupied = prediction[0][0] > 0.5
-        confidence = float(prediction[0][0] if is_occupied else 1 - prediction[0][0])
+        # Convert to bytes
+        _, buffer = cv2.imencode('.jpg', img_annotated)
+        img_io = io.BytesIO(buffer)
+        img_io.seek(0)
         
-        return jsonify({
-            'prediction': 'occupied' if is_occupied else 'available',
-            'confidence': confidence
-        })
+        return send_file(img_io, mimetype='image/jpeg')
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
-@app.route('/api/analytics', methods=['GET'])
-def get_analytics():
-    """Get parking analytics data"""
-    hourly_trends = data_generator.generate_hourly_trends()
-    weekly_forecast = data_generator.generate_weekly_forecast()
-    
-    return jsonify({
-        'hourly_trends': hourly_trends,
-        'weekly_forecast': weekly_forecast,
-        'total_capacity': sum(z["total_slots"] for z in data_generator.zones),
-        'total_zones': len(data_generator.zones)
-    })
 
-@app.route('/api/zones', methods=['GET'])
-def get_zones():
-    """Get all parking zones with current data"""
-    zones_data = data_generator.generate_zone_data()
-    return jsonify({
-        'zones': zones_data,
-        'timestamp': __import__('datetime').datetime.now().isoformat(),
-        'total_zones': len(zones_data)
-    })
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    """
+    Download saved files
+    """
+    # Check in outputs folder
+    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, mimetype='image/jpeg')
+    
+    # Check in uploads folder
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, mimetype='image/jpeg')
+    
+    return jsonify({'error': 'File not found'}), 404
 
-@app.route('/api/zones/<int:zone_id>/forecast', methods=['GET'])
-def get_zone_forecast(zone_id):
-    """Get forecast for a specific zone"""
-    hours = request.args.get('hours', default=6, type=int)
-    forecast = data_generator.generate_forecast(zone_id, hours)
-    
-    if not forecast:
-        return jsonify({'error': 'Zone not found'}), 404
-    
-    return jsonify({
-        'zone_id': zone_id,
-        'forecast': forecast,
-        'hours': hours
-    })
 
-@app.route('/api/traffic/congestion', methods=['GET'])
-def get_traffic_congestion():
-    """Get traffic congestion data for all zones"""
-    zones_data = data_generator.generate_zone_data()
-    
-    congestion_summary = {
-        'zones': zones_data,
-        'overall_congestion': {
-            'critical': len([z for z in zones_data if z['congestion']['level'] == 'Critical']),
-            'high': len([z for z in zones_data if z['congestion']['level'] == 'High']),
-            'moderate': len([z for z in zones_data if z['congestion']['level'] == 'Moderate']),
-            'low': len([z for z in zones_data if z['congestion']['level'] == 'Low']),
-            'minimal': len([z for z in zones_data if z['congestion']['level'] == 'Minimal'])
-        },
-        'avg_wait_time': round(sum(z['avg_wait_time'] for z in zones_data) / len(zones_data), 1),
-        'total_traffic_flow': sum(z['traffic_flow'] for z in zones_data)
-    }
-    
-    return jsonify(congestion_summary)
+@app.route('/detections/recent', methods=['GET'])
+def get_recent_detections():
+    """
+    Get list of recent detected images
+    Returns: JSON array of detected image filenames (newest first)
+    """
+    try:
+        # Get all detected images from output folder
+        files = []
+        if os.path.exists(OUTPUT_FOLDER):
+            for filename in os.listdir(OUTPUT_FOLDER):
+                if filename.startswith('detected_') and filename.endswith('.jpg'):
+                    filepath = os.path.join(OUTPUT_FOLDER, filename)
+                    files.append({
+                        'filename': filename,
+                        'timestamp': os.path.getmtime(filepath),
+                        'url': f'/outputs/{filename}'
+                    })
+        
+        # Sort by timestamp (newest first) and limit to 20
+        files.sort(key=lambda x: x['timestamp'], reverse=True)
+        files = files[:20]
+        
+        return jsonify({
+            'success': True,
+            'count': len(files),
+            'images': files
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
-@app.route('/api/train', methods=['POST'])
-def train_model():
-    """Endpoint to trigger model training"""
-    return jsonify({
-        'message': 'Model training should be done through the Jupyter notebook',
-        'notebook': 'parking-lot-prediction.ipynb',
-        'instructions': 'Run all cells in the notebook to train and save the model'
-    }), 200
+
+@app.route('/outputs/<filename>')
+def serve_output(filename):
+    """
+    Serve detected images from outputs folder
+    """
+    file_path = os.path.join(OUTPUT_FOLDER, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, mimetype='image/jpeg')
+    
+    return jsonify({'error': 'File not found'}), 404
+
+
+# ============================================================
+# Run Server
+# ============================================================
 
 if __name__ == '__main__':
-    print("🚀 Starting ParkSight Backend API...")
-    print("=" * 50)
+    print("\n" + "=" * 70)
+    print("🚗 Parking Space Detection API")
+    print("=" * 70)
+    print(f"✅ Model: {MODEL_PATH}")
+    print(f"✅ Confidence Threshold: {CONFIDENCE_THRESHOLD}")
+    print(f"✅ Upload Folder: {UPLOAD_FOLDER}")
+    print(f"✅ Output Folder: {OUTPUT_FOLDER}")
+    print("=" * 70)
+    print("\n🌐 Starting Flask server...")
+    print("📡 API will be available at: http://localhost:5001")
+    print("📚 Documentation: http://localhost:5001/")
+    print("\nPress CTRL+C to stop the server")
+    print("=" * 70 + "\n")
     
-    # Don't load model on startup to speed up server start
-    print("ℹ️  Model will be loaded on first prediction request")
-    print("   (To pre-load model, access /api/health after server starts)")
-    
-    print("=" * 50)
-    print("🌐 Server starting on http://localhost:5000")
-    print("📝 API Documentation:")
-    print("   - GET  /api/health - Health check")
-    print("   - GET  /api/parking/status - Get parking status")
-    print("   - POST /api/predict/image - Predict from image")
-    print("   - POST /api/predict/video - Predict from video frame")
-    print("   - GET  /api/analytics - Get analytics data")
-    print("=" * 50)
-    print("✅ Server is ready!")
-    print("")
-    
-    # Try port 5001 if 5000 is busy (common on macOS with AirPlay)
-    import socket
-    port = 5000
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('', port))
-        sock.close()
-    except OSError:
-        port = 5001
-        print(f"⚠️  Port 5000 in use, using port {port} instead")
-        print(f"🌐 Server will start on http://localhost:{port}")
-    
-    app.run(debug=True, host='0.0.0.0', port=port)
+    # Run Flask app
+    app.run(
+        host='0.0.0.0',
+        port=5001,
+        debug=True,
+        threaded=True
+    )
