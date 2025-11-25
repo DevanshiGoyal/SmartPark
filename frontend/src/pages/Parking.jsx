@@ -23,6 +23,9 @@ import {
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 
+// API URL configuration
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5001';
+
 export default function Parking() {
   const [slots] = useState([
     { id: 1, status: "available" },
@@ -50,12 +53,12 @@ export default function Parking() {
     const fetchRecentDetections = async () => {
       setIsLoadingGallery(true);
       try {
-        const response = await fetch('http://localhost:5001/detections/recent');
+        const response = await fetch(`${API_URL}/detections/recent`);
         const data = await response.json();
         
         if (data.success && data.images.length > 0) {
           // Map to full URLs
-          const imageUrls = data.images.map(img => `http://localhost:5001${img.url}`);
+          const imageUrls = data.images.map(img => `${API_URL}${img.url}`);
           setDetectionImages(imageUrls);
         } else {
           // Fallback to placeholder if no detections yet
@@ -110,7 +113,7 @@ export default function Parking() {
       const formData = new FormData();
       formData.append('image', file);  // Backend expects 'image' not 'file'
 
-      const response = await fetch('http://localhost:5001/detect', {
+      const response = await fetch(`${API_URL}/detect`, {
         method: 'POST',
         body: formData,
       });
@@ -127,10 +130,10 @@ export default function Parking() {
       setDetectionError(null);
 
       // Refresh gallery to show new detection
-      const refreshResponse = await fetch('http://localhost:5001/detections/recent');
+      const refreshResponse = await fetch(`${API_URL}/detections/recent`);
       const refreshData = await refreshResponse.json();
       if (refreshData.success && refreshData.images.length > 0) {
-        const imageUrls = refreshData.images.map(img => `http://localhost:5001${img.url}`);
+        const imageUrls = refreshData.images.map(img => `${API_URL}${img.url}`);
         setDetectionImages(imageUrls);
         setCurrentIndex(0); // Show the newest detection
       }
@@ -283,7 +286,7 @@ export default function Parking() {
                       <div className="mt-2 text-xs text-red-300">
                         <p>🔧 Troubleshooting:</p>
                         <ul className="list-disc ml-5 mt-1 space-y-1">
-                          <li>Check if backend is running on http://localhost:5001</li>
+                          <li>Check if backend is running on {API_URL}</li>
                           <li>Verify best.pt model file exists in backend folder</li>
                           <li>Restart the backend server</li>
                         </ul>
