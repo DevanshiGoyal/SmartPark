@@ -660,9 +660,10 @@ if __name__ == '__main__':
     print("=" * 70 + "\n")
     
     # Run Flask app
+    port = int(os.environ.get('PORT', 5001))
     app.run(
         host='0.0.0.0',
-        port=5001,
-        debug=True,
+        port=port,
+        debug=False,  # Set to False for production
         threaded=True
     )
