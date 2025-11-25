@@ -18,7 +18,6 @@ services:
   - type: web
     name: smartpark-frontend
     env: static
-    region: oregon
     plan: free
     branch: main
     buildCommand: "cd frontend && npm install && npm run build"
